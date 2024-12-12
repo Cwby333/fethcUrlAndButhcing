@@ -112,12 +112,23 @@ func batch(ctx context.Context, codeChannel <- chan int, batchSize int, batchTim
 	return out
 }
 
+func fanOutButch(ctx context.Context, codeChannel <- chan int, batchSize int, batchTimeout time.Duration, countWorkers int) []chan []int {
+	out := make([]chan []int, 0, countWorkers)
+
+	for range countWorkers {
+		out = append(out, batch(ctx, codeChannel, batchSize, batchTimeout))
+	}
+
+	return out
+}
+
 func main() {
 	ctx, _ := context.WithTimeout(context.Background(), time.Second * 10)
 	urls := make(chan string)
 	codeChan := make(chan int)
 	g, gctx := errgroup.WithContext(ctx)
 	builder := &strings.Builder{}
+	wg := &sync.WaitGroup{}
 	reset(builder)
 
 	go func ()  {
@@ -144,11 +155,20 @@ func main() {
 		close(codeChan)
 	}()
 
-	out := batch(ctx, codeChan, 2, time.Second)
+	slice := fanOutButch(ctx, codeChan, 2, time.Second * 2, 5)
 
-	for batch := range out {
-		fmt.Println(batch)
+	for i := range slice {
+		wg.Add(1)
+		go func ()  {
+			defer wg.Done()
+			
+			for value := range slice[i] {
+				fmt.Println(value)
+			}
+		}()
 	}
+
+	wg.Wait()
 }
 
 func reset(b *strings.Builder) {
