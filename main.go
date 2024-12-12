@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -122,12 +123,58 @@ func fanOutButch(ctx context.Context, codeChannel <- chan int, batchSize int, ba
 	return out
 }
 
+func fanInBatch(ctx context.Context, channelsButch []chan []int, counter *int, mu *sync.Mutex, resultChannel chan []int) {
+	for {
+		if *counter == len(channelsButch) {
+			return
+		}
+
+		select {
+		case <- ctx.Done():
+			return
+		default:
+		}
+
+		mu.Lock()
+		idx := *counter
+		*counter++
+		mu.Unlock()
+
+	loop:
+		for {
+			select {
+			case <- ctx.Done():
+				return
+			default:
+			}
+
+			select {
+			case <- ctx.Done():
+				return
+			case batch, ok := <- channelsButch[idx]:
+				if !ok {
+					break loop
+				}
+
+				select {
+				case <- ctx.Done():
+					return
+				case resultChannel <- batch:
+				}
+			}
+		}
+	}
+}
+
 func main() {
 	ctx, _ := context.WithTimeout(context.Background(), time.Second * 10)
 	urls := make(chan string)
 	codeChan := make(chan int)
 	g, gctx := errgroup.WithContext(ctx)
 	builder := &strings.Builder{}
+	resultChannel := make(chan []int)
+	counter := 0
+	mu := &sync.Mutex{}
 	wg := &sync.WaitGroup{}
 	reset(builder)
 
@@ -151,24 +198,32 @@ func main() {
 			})
 		}
 
-		g.Wait()
+		if err := g.Wait(); err != nil {
+			log.Fatal(err)
+		}
+
 		close(codeChan)
 	}()
 
 	slice := fanOutButch(ctx, codeChan, 2, time.Second * 2, 5)
 
-	for i := range slice {
+	for range 5 {
 		wg.Add(1)
 		go func ()  {
 			defer wg.Done()
 			
-			for value := range slice[i] {
-				fmt.Println(value)
-			}
+			fanInBatch(ctx, slice, &counter, mu, resultChannel)
 		}()
 	}
 
-	wg.Wait()
+	go func ()  {
+		wg.Wait()
+		close(resultChannel)
+	}()
+
+	for b := range resultChannel {
+		fmt.Println(b)
+	}
 }
 
 func reset(b *strings.Builder) {
